@@ -8,9 +8,9 @@ A status bar and native macOS notifications for [Claude Code](https://docs.anthr
 
 ![statusline](assets/statusline.png)
 
-**Line 1** — model, project path, git branch, uncommitted changes, context window usage, session cost
+**Line 1** — model, project path, git branch, uncommitted changes
 
-**Line 2** — Claude subscription usage limits (5-hour and 7-day windows) with reset countdowns
+**Line 2** — Claude subscription usage limits (5-hour and 7-day windows) with reset countdowns, context window usage, session cost
 
 ### Prerequisites
 

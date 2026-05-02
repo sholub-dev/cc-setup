@@ -63,17 +63,43 @@ CTX_FMT=$(format_num $CTX_TOKENS)
 BRANCH=$(git branch --show-current 2>/dev/null || echo "N/A")
 ADDED=0
 REMOVED=0
+ADDED_FILES=0
+REMOVED_FILES=0
 if [ "$BRANCH" != "N/A" ]; then
-    SHORTSTAT=$(git diff --shortstat HEAD 2>/dev/null)
-    if [ -n "$SHORTSTAT" ]; then
-        ADDED=$(echo "$SHORTSTAT" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+')
-        REMOVED=$(echo "$SHORTSTAT" | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+')
-        ADDED=${ADDED:-0}
-        REMOVED=${REMOVED:-0}
-    fi
+    while IFS=$'\t' read -r ADD_COUNT REMOVE_COUNT _; do
+        if [[ "$ADD_COUNT" =~ ^[0-9]+$ ]]; then
+            ADDED=$((ADDED + ADD_COUNT))
+        fi
+        if [[ "$REMOVE_COUNT" =~ ^[0-9]+$ ]]; then
+            REMOVED=$((REMOVED + REMOVE_COUNT))
+        fi
+    done < <(git diff --numstat HEAD 2>/dev/null)
+
+    while IFS=$'\t' read -r STATUS _; do
+        case "$STATUS" in
+            A*)
+                ADDED_FILES=$((ADDED_FILES + 1))
+                ;;
+            D*)
+                REMOVED_FILES=$((REMOVED_FILES + 1))
+                ;;
+        esac
+    done < <(git diff --name-status HEAD 2>/dev/null)
+
+    while IFS= read -r -d '' UNTRACKED_FILE; do
+        if [ -f "$UNTRACKED_FILE" ]; then
+            ADDED_FILES=$((ADDED_FILES + 1))
+            UNTRACKED_LINES=$(wc -l < "$UNTRACKED_FILE" 2>/dev/null)
+            if [[ "$UNTRACKED_LINES" =~ ^[[:space:]]*[0-9]+$ ]]; then
+                ADDED=$((ADDED + UNTRACKED_LINES))
+            fi
+        fi
+    done < <(git ls-files --others --exclude-standard -z 2>/dev/null)
 fi
 
-echo -e "${CYAN}${MODEL}${R} ${DIM}|${R} ${PROJECT_PATH} ${DIM}|${R} ${MAGENTA}${BRANCH}${R} ${DIM}|${R} ${GREEN}+${ADDED}${R} ${RED}-${REMOVED}${R} ${DIM}|${R} Ctx: ${CYAN}${CTX_PERCENT}%${R} ${DIM}(${CTX_FMT})${R} ${DIM}|${R} Cost: ${CYAN}\$${COST_FMT}${R}"
+echo -e "${CYAN}${MODEL}${R} ${DIM}|${R} ${PROJECT_PATH} ${DIM}|${R} ${MAGENTA}${BRANCH}${R} ${DIM}|${R} L: ${GREEN}+${ADDED}${R} ${RED}-${REMOVED}${R} ${DIM}|${R} F: ${GREEN}+${ADDED_FILES}${R} ${RED}-${REMOVED_FILES}${R}"
+
+CTX_COST_STR="Ctx: ${CYAN}${CTX_PERCENT}%${R} ${DIM}(${CTX_FMT})${R} ${DIM}|${R} Cost: ${CYAN}\$${COST_FMT}${R}"
 
 if [ -n "$RL_5H_PCT" ] || [ -n "$RL_7D_PCT" ]; then
     LINE2=""
@@ -108,5 +134,13 @@ if [ -n "$RL_5H_PCT" ] || [ -n "$RL_7D_PCT" ]; then
         fi
     fi
 
+    if [ -n "$LINE2" ]; then
+        LINE2="${LINE2} ${DIM}|${R} ${CTX_COST_STR}"
+    else
+        LINE2="$CTX_COST_STR"
+    fi
+
     echo -e "$LINE2"
+else
+    echo -e "$CTX_COST_STR"
 fi
