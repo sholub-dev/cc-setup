@@ -101,7 +101,51 @@ echo -e "${CYAN}${MODEL}${R} ${DIM}|${R} ${PROJECT_PATH} ${DIM}|${R} ${MAGENTA}$
 
 CTX_COST_STR="Ctx: ${CYAN}${CTX_PERCENT}%${R} ${DIM}(${CTX_FMT})${R} ${DIM}|${R} Cost: ${CYAN}\$${COST_FMT}${R}"
 
-if [ -n "$RL_5H_PCT" ] || [ -n "$RL_7D_PCT" ]; then
+# Per-model weekly buckets (e.g. Fable).
+MS_STR=""
+append_ms() {
+    [ -z "$1" ] && return
+    local PCT SEG
+    PCT=$(printf "%.0f" "$2")
+    SEG="$1: ${CYAN}${PCT}%${R}"
+    if [ -n "$MS_STR" ]; then
+        MS_STR="${MS_STR} ${DIM}|${R} ${SEG}"
+    else
+        MS_STR="$SEG"
+    fi
+}
+
+while IFS=$'\t' read -r MS_NAME MS_PCT; do
+    append_ms "$MS_NAME" "$MS_PCT"
+done < <(echo "$input" | jq -r '.rate_limits.model_scoped // [] | .[] | select(.utilization != null) | "\(.display_name)\t\(.utilization)"' 2>/dev/null)
+
+# The CLI (as of 2.1.241) never fills model_scoped in the statusline input,
+# so fall back to polling the usage endpoint (cached, refreshed in background).
+if [ -z "$MS_STR" ]; then
+    USAGE_CACHE="$STATUSLINE_DIR/usage-scoped.json"
+    CACHE_AGE=$(( $(date +%s) - $(stat -f %m "$USAGE_CACHE" 2>/dev/null || echo 0) ))
+    if [ "$CACHE_AGE" -ge 300 ]; then
+        touch "$USAGE_CACHE" 2>/dev/null
+        (
+            TOK=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null | jq -r '.claudeAiOauth.accessToken // empty')
+            [ -n "$TOK" ] || exit 0
+            OUT=$(curl -s --max-time 5 https://api.anthropic.com/api/oauth/usage \
+                -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" \
+                -H "anthropic-beta: oauth-2025-04-20" \
+                | jq -c '[.limits // [] | .[] | select(.kind == "weekly_scoped" and .scope.model.display_name != null) | {display_name: .scope.model.display_name, utilization: .percent}]' 2>/dev/null)
+            if [ -n "$OUT" ] && [ "$OUT" != "null" ]; then
+                printf '%s\n' "$OUT" > "$USAGE_CACHE.$$" && mv -f "$USAGE_CACHE.$$" "$USAGE_CACHE"
+            fi
+        ) >/dev/null 2>&1 &
+    fi
+    if [ -s "$USAGE_CACHE" ]; then
+        while IFS=$'\t' read -r MS_NAME MS_PCT; do
+            append_ms "$MS_NAME" "$MS_PCT"
+        done < <(jq -r '.[]? | "\(.display_name)\t\(.utilization)"' "$USAGE_CACHE" 2>/dev/null)
+    fi
+fi
+
+if [ -n "$RL_5H_PCT" ] || [ -n "$RL_7D_PCT" ] || [ -n "$MS_STR" ]; then
     LINE2=""
 
     if [ -n "$RL_5H_PCT" ]; then
@@ -131,6 +175,14 @@ if [ -n "$RL_5H_PCT" ] || [ -n "$RL_7D_PCT" ]; then
             LINE2="${LINE2} ${DIM}|${R} ${SD_STR}"
         else
             LINE2="$SD_STR"
+        fi
+    fi
+
+    if [ -n "$MS_STR" ]; then
+        if [ -n "$LINE2" ]; then
+            LINE2="${LINE2} ${DIM}|${R} ${MS_STR}"
+        else
+            LINE2="$MS_STR"
         fi
     fi
 
