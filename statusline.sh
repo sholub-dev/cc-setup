@@ -123,11 +123,15 @@ done < <(echo "$input" | jq -r '.rate_limits.model_scoped // [] | .[] | select(.
 # so fall back to polling the usage endpoint (cached, refreshed in background).
 if [ -z "$MS_STR" ]; then
     USAGE_CACHE="$STATUSLINE_DIR/usage-scoped.json"
-    CACHE_AGE=$(( $(date +%s) - $(stat -f %m "$USAGE_CACHE" 2>/dev/null || echo 0) ))
+    CACHE_MTIME=$(stat -f %m "$USAGE_CACHE" 2>/dev/null || stat -c %Y "$USAGE_CACHE" 2>/dev/null || echo 0)
+    CACHE_AGE=$(( $(date +%s) - CACHE_MTIME ))
     if [ "$CACHE_AGE" -ge 300 ]; then
         touch "$USAGE_CACHE" 2>/dev/null
         (
             TOK=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null | jq -r '.claudeAiOauth.accessToken // empty')
+            if [ -z "$TOK" ] && [ -f "$HOME/.claude/.credentials.json" ]; then
+                TOK=$(jq -r '.claudeAiOauth.accessToken // empty' "$HOME/.claude/.credentials.json" 2>/dev/null)
+            fi
             [ -n "$TOK" ] || exit 0
             OUT=$(curl -s --max-time 5 https://api.anthropic.com/api/oauth/usage \
                 -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" \
