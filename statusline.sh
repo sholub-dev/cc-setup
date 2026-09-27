@@ -86,18 +86,34 @@ if [ "$BRANCH" != "N/A" ]; then
         esac
     done < <(git diff --name-status HEAD 2>/dev/null)
 
+    # Untracked trees can hold thousands of files and gigabytes of data. One wc
+    # per file, over all of them, took minutes and froze the whole machine, so
+    # read lines from a bounded sample only and mark the total as a lower bound.
+    MAX_UNTRACKED_FILES=500
+    MAX_UNTRACKED_SIZE=512k
+    UNTRACKED_SAMPLE=()
     while IFS= read -r -d '' UNTRACKED_FILE; do
-        if [ -f "$UNTRACKED_FILE" ]; then
-            ADDED_FILES=$((ADDED_FILES + 1))
-            UNTRACKED_LINES=$(wc -l < "$UNTRACKED_FILE" 2>/dev/null)
-            if [[ "$UNTRACKED_LINES" =~ ^[[:space:]]*[0-9]+$ ]]; then
-                ADDED=$((ADDED + UNTRACKED_LINES))
-            fi
+        ADDED_FILES=$((ADDED_FILES + 1))
+        if [ ${#UNTRACKED_SAMPLE[@]} -lt $MAX_UNTRACKED_FILES ]; then
+            UNTRACKED_SAMPLE+=("$UNTRACKED_FILE")
         fi
     done < <(git ls-files --others --exclude-standard -z 2>/dev/null)
+
+    LINES_CAPPED=""
+    [ $ADDED_FILES -gt $MAX_UNTRACKED_FILES ] && LINES_CAPPED="+"
+    if [ ${#UNTRACKED_SAMPLE[@]} -gt 0 ]; then
+        UNTRACKED_LINES=$(find "${UNTRACKED_SAMPLE[@]}" -maxdepth 0 -type f -size -"$MAX_UNTRACKED_SIZE" -print0 2>/dev/null \
+            | xargs -0 cat 2>/dev/null | wc -l)
+        if [[ "$UNTRACKED_LINES" =~ ^[[:space:]]*[0-9]+$ ]]; then
+            ADDED=$((ADDED + UNTRACKED_LINES))
+        fi
+        if [ -n "$(find "${UNTRACKED_SAMPLE[@]}" -maxdepth 0 -type f ! -size -"$MAX_UNTRACKED_SIZE" -print -quit 2>/dev/null)" ]; then
+            LINES_CAPPED="+"
+        fi
+    fi
 fi
 
-echo -e "${CYAN}${MODEL}${R} ${DIM}|${R} ${PROJECT_PATH} ${DIM}|${R} ${MAGENTA}${BRANCH}${R} ${DIM}|${R} L: ${GREEN}+${ADDED}${R} ${RED}-${REMOVED}${R} ${DIM}|${R} F: ${GREEN}+${ADDED_FILES}${R} ${RED}-${REMOVED_FILES}${R}"
+echo -e "${CYAN}${MODEL}${R} ${DIM}|${R} ${PROJECT_PATH} ${DIM}|${R} ${MAGENTA}${BRANCH}${R} ${DIM}|${R} L: ${GREEN}+${ADDED}${LINES_CAPPED}${R} ${RED}-${REMOVED}${R} ${DIM}|${R} F: ${GREEN}+${ADDED_FILES}${R} ${RED}-${REMOVED_FILES}${R}"
 
 CTX_COST_STR="Ctx: ${CYAN}${CTX_PERCENT}%${R} ${DIM}(${CTX_FMT})${R} ${DIM}|${R} Cost: ${CYAN}\$${COST_FMT}${R}"
 
@@ -136,7 +152,7 @@ if [ -z "$MS_STR" ]; then
             OUT=$(curl -s --max-time 5 https://api.anthropic.com/api/oauth/usage \
                 -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" \
                 -H "anthropic-beta: oauth-2025-04-20" \
-                | jq -c '[.limits // [] | .[] | select(.kind == "weekly_scoped" and .scope.model.display_name != null) | {display_name: .scope.model.display_name, utilization: .percent}]' 2>/dev/null)
+                | jq -c 'select(.error == null) | [.limits // [] | .[] | select(.kind == "weekly_scoped" and .scope.model.display_name != null) | {display_name: .scope.model.display_name, utilization: .percent}] | select(length > 0)' 2>/dev/null)
             if [ -n "$OUT" ] && [ "$OUT" != "null" ]; then
                 printf '%s\n' "$OUT" > "$USAGE_CACHE.$$" && mv -f "$USAGE_CACHE.$$" "$USAGE_CACHE"
             fi
