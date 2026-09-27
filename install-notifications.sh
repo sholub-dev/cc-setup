@@ -13,7 +13,7 @@ if [ -n "${SUDO_USER:-}" ]; then
     HOME="$(dscl . -read /Users/"$SUDO_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
     HOME="${HOME:-/Users/$SUDO_USER}"
 fi
-GITHUB_RAW="https://raw.githubusercontent.com/sholub1989/cc-setup/master"
+GITHUB_RAW="https://raw.githubusercontent.com/sholub-dev/cc-setup/master"
 INSTALL_DIR="$HOME/.claude/extensions/cc-notifications"
 APP_DIR="$HOME/Applications/ClaudeNotify.app"
 

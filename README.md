@@ -20,13 +20,13 @@ A status bar and native macOS notifications for [Claude Code](https://docs.anthr
 ### Setup
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sholub1989/cc-setup/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sholub-dev/cc-setup/master/install.sh | bash
 ```
 
 #### Developer install
 
 ```bash
-git clone https://github.com/sholub1989/cc-setup.git
+git clone https://github.com/sholub-dev/cc-setup.git
 cd cc-setup
 ./install.sh
 ```
@@ -39,7 +39,7 @@ cd cc-setup
 ### Uninstall
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sholub1989/cc-setup/master/uninstall.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sholub-dev/cc-setup/master/uninstall.sh | bash
 ```
 
 ---
@@ -77,7 +77,7 @@ Shows the project name so you know which session needs you.
 ### Setup
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sholub1989/cc-setup/master/install-notifications.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sholub-dev/cc-setup/master/install-notifications.sh | bash
 ```
 
 On first run, macOS will ask you to allow notifications for **ClaudeNotify** — click Allow. Restart Claude Code to activate the hooks.
@@ -85,7 +85,7 @@ On first run, macOS will ask you to allow notifications for **ClaudeNotify** —
 #### Developer install
 
 ```bash
-git clone https://github.com/sholub1989/cc-setup.git
+git clone https://github.com/sholub-dev/cc-setup.git
 cd cc-setup
 ./install-notifications.sh
 ```
@@ -104,5 +104,5 @@ Edit `~/.claude/scripts/notify.sh` to customize:
 ### Uninstall
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sholub1989/cc-setup/master/uninstall-notifications.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sholub-dev/cc-setup/master/uninstall-notifications.sh | bash
 ```
