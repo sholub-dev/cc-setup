@@ -1,218 +1,196 @@
 #!/bin/bash
-input=$(cat)
+# Must run on macOS /bin/bash 3.2: no $EPOCHSECONDS, no printf '%(...)T'.
 
-CYAN='\033[1;36m'
-MAGENTA='\033[1;35m'
-GREEN='\033[32m'
-RED='\033[31m'
-DIM='\033[2m'
-R='\033[0m'
-
-format_num() {
-    printf "%d" "$1" | rev | sed 's/.\{3\}/& /g' | rev | sed 's/^ //'
-}
-
-eval $(echo "$input" | jq -r '
-    @sh "SESSION_ID=\(.session_id // "default")",
-    @sh "MODEL=\(.model.display_name // "Unknown")",
-    @sh "CWD=\(.cwd // "")",
-    @sh "CTX_SIZE=\(.context_window.context_window_size // 200000)",
-    @sh "COST=\(.cost.total_cost_usd // 0)",
-    @sh "INPUT_TOKENS=\(.context_window.current_usage.input_tokens // -1)",
-    @sh "CACHE_CREATE=\(.context_window.current_usage.cache_creation_input_tokens // 0)",
-    @sh "CACHE_READ=\(.context_window.current_usage.cache_read_input_tokens // 0)",
-    @sh "RL_5H_PCT=\(.rate_limits.five_hour.used_percentage // "")",
-    @sh "RL_5H_RESET=\(.rate_limits.five_hour.resets_at // "")",
-    @sh "RL_7D_PCT=\(.rate_limits.seven_day.used_percentage // "")",
-    @sh "RL_7D_RESET=\(.rate_limits.seven_day.resets_at // "")"
-' | tr '\n' ' ')
-
-if [ -n "$CWD" ]; then
-    PROJECT_PATH="/$(echo "$CWD" | rev | cut -d'/' -f1-2 | rev)"
-else
-    PROJECT_PATH=""
-fi
+CYAN=$'\033[1;36m'
+MAGENTA=$'\033[1;35m'
+GREEN=$'\033[32m'
+RED=$'\033[31m'
+DIM=$'\033[2m'
+R=$'\033[0m'
 
 STATUSLINE_DIR="$HOME/.claude/extensions/cc-setup"
-CACHE_FILE="$STATUSLINE_DIR/ctx-cache-${SESSION_ID}"
+USAGE_CACHE="$STATUSLINE_DIR/usage-scoped.v2"
 
-# Round to nearest 100 to avoid flicker
-if [ "$INPUT_TOKENS" -ge 0 ] 2>/dev/null; then
-    CTX_RAW=$((INPUT_TOKENS + CACHE_CREATE + CACHE_READ))
-    CTX_TOKENS=$(( (CTX_RAW + 50) / 100 * 100 ))
-    if [ "$CTX_TOKENS" -gt 0 ]; then
-        echo "$CTX_TOKENS" > "$CACHE_FILE"
-    fi
-else
-    if [ -f "$CACHE_FILE" ]; then
-        CTX_TOKENS=$(cat "$CACHE_FILE")
-    else
-        CTX_TOKENS=0
-    fi
-fi
+# Cache format: first line is the last refresh attempt (epoch), then one
+# "name<TAB>percent" line per model.
+USAGE_TEXT=""
+[ -s "$USAGE_CACHE" ] && USAGE_TEXT=$(<"$USAGE_CACHE")
 
-if [ "$CTX_SIZE" -gt 0 ] && [ "$CTX_TOKENS" -gt 0 ]; then
-    CTX_PERCENT=$(awk "BEGIN {printf \"%.1f\", ($CTX_TOKENS / $CTX_SIZE) * 100}")
-else
-    CTX_PERCENT="0.0"
-fi
+# Program lives in a variable because bash 3.2 mangles backslashes and quotes
+# in a $(...) inside double quotes.
+read -r -d '' JQ_PROG <<'JQ'
+    def cents: (. * 100 + 0.5 | floor) as $x
+        | "\($x / 100 | floor).\($x % 100 | if . < 10 then "0\(.)" else tostring end)";
+    def seg($p): "\($C)\($p | round)%\($R)";
 
-COST_FMT=$(printf "%.2f" "$COST")
-CTX_FMT=$(format_num $CTX_TOKENS)
+    " \($D)|\($R) " as $SEP
+    | (.context_window.context_window_size // 200000) as $size
+    | .context_window.current_usage as $u
+    | (if $u.input_tokens != null
+       then ((($u.input_tokens + ($u.cache_creation_input_tokens // 0)
+               + ($u.cache_read_input_tokens // 0)) + 50) / 100 | floor) * 100
+       else -1 end) as $tok
+    | (.rate_limits // {}) as $rl
+    | ([$rl.model_scoped // [] | .[] | select(.utilization != null)
+        | {n: .display_name, p: .utilization}]) as $live
+    | ($S | split("\n")) as $lines
+    | ($lines[1:] | map(select(length > 0))) as $data
+    | ($data | map(split("\t") | {n: .[0], p: (.[1] | tonumber? // 0)})) as $cached
+    | (now | floor) as $now
+    | (if ($live | length) > 0 then $live else $cached end) as $ms
+    | ([
+        (($rl.five_hour // {}) | select(.used_percentage != null)
+            | seg(.used_percentage)
+              + (if .resets_at != null
+                 then ((.resets_at - $now) | if . < 0 then 0 else . end)
+                      | " \(. / 3600 | floor)h \(. % 3600 / 60 | floor)m"
+                 else "" end)),
+        (($rl.seven_day // {}) | select(.used_percentage != null)
+            | seg(.used_percentage)
+              + (if .resets_at != null
+                 then " " + (.resets_at | localtime | strftime("%a %-I:%M %p"))
+                 else "" end)),
+        (if ($ms | length) > 0
+         then $ms | map("\(.n): \(seg(.p))") | join($SEP)
+         else empty end)
+      ] | join($SEP)) as $head
+    | @sh "SESSION_ID=\(.session_id // "default")",
+      @sh "MODEL=\(.model.display_name // "Unknown")",
+      @sh "CWD=\(.cwd // "")",
+      @sh "CTX_SIZE=\($size)",
+      @sh "CTX_TOKENS=\($tok)",
+      @sh "COST_FMT=\(.cost.total_cost_usd // 0 | cents)",
+      @sh "LINE2_HEAD=\($head)",
+      @sh "NOW=\($now)",
+      @sh "USAGE_DATA=\($data | join("\n"))",
+      @sh "USAGE_STALE=\(if ($live | length) == 0 and $now - ($lines[0] | tonumber? // 0) >= 300 then 1 else 0 end)"
+JQ
 
-BRANCH=$(git branch --show-current 2>/dev/null || echo "N/A")
-ADDED=0
-REMOVED=0
-ADDED_FILES=0
-REMOVED_FILES=0
-if [ "$BRANCH" != "N/A" ]; then
-    while IFS=$'\t' read -r ADD_COUNT REMOVE_COUNT _; do
-        if [[ "$ADD_COUNT" =~ ^[0-9]+$ ]]; then
-            ADDED=$((ADDED + ADD_COUNT))
+eval "$(jq -r --arg C "$CYAN" --arg D "$DIM" --arg R "$R" \
+    --arg S "$USAGE_TEXT" "$JQ_PROG")"
+
+PROJECT_PATH=""
+BRANCH="N/A"
+DIR=""
+if [ -n "$CWD" ]; then
+    PARENT=${CWD%/*}
+    PROJECT_PATH="/${PARENT##*/}/${CWD##*/}"
+    DIR=$CWD
+    while [ -n "$DIR" ] && [ ! -e "$DIR/.git" ]; do DIR=${DIR%/*}; done
+    if [ -n "$DIR" ]; then
+        GIT_DIR="$DIR/.git"
+        if [ -f "$GIT_DIR" ]; then
+            read -r _ GIT_DIR < "$GIT_DIR"
+            case $GIT_DIR in /*) ;; *) GIT_DIR="$DIR/$GIT_DIR" ;; esac
         fi
-        if [[ "$REMOVE_COUNT" =~ ^[0-9]+$ ]]; then
-            REMOVED=$((REMOVED + REMOVE_COUNT))
-        fi
-    done < <(git diff --numstat HEAD 2>/dev/null)
-
-    while IFS=$'\t' read -r STATUS _; do
-        case "$STATUS" in
-            A*)
-                ADDED_FILES=$((ADDED_FILES + 1))
-                ;;
-            D*)
-                REMOVED_FILES=$((REMOVED_FILES + 1))
-                ;;
+        HEAD_REF=""
+        read -r HEAD_REF < "$GIT_DIR/HEAD" 2>/dev/null
+        case $HEAD_REF in
+            "ref: refs/heads/"*) BRANCH=${HEAD_REF#ref: refs/heads/} ;;
+            ?*) BRANCH=${HEAD_REF:0:7} ;;
         esac
-    done < <(git diff --name-status HEAD 2>/dev/null)
-
-    # Untracked trees can hold thousands of files and gigabytes of data. One wc
-    # per file, over all of them, took minutes and froze the whole machine, so
-    # read lines from a bounded sample only and mark the total as a lower bound.
-    MAX_UNTRACKED_FILES=500
-    MAX_UNTRACKED_SIZE=512k
-    UNTRACKED_SAMPLE=()
-    while IFS= read -r -d '' UNTRACKED_FILE; do
-        ADDED_FILES=$((ADDED_FILES + 1))
-        if [ ${#UNTRACKED_SAMPLE[@]} -lt $MAX_UNTRACKED_FILES ]; then
-            UNTRACKED_SAMPLE+=("$UNTRACKED_FILE")
-        fi
-    done < <(git ls-files --others --exclude-standard -z 2>/dev/null)
-
-    LINES_CAPPED=""
-    [ $ADDED_FILES -gt $MAX_UNTRACKED_FILES ] && LINES_CAPPED="+"
-    if [ ${#UNTRACKED_SAMPLE[@]} -gt 0 ]; then
-        UNTRACKED_LINES=$(find "${UNTRACKED_SAMPLE[@]}" -maxdepth 0 -type f -size -"$MAX_UNTRACKED_SIZE" -print0 2>/dev/null \
-            | xargs -0 cat 2>/dev/null | wc -l)
-        if [[ "$UNTRACKED_LINES" =~ ^[[:space:]]*[0-9]+$ ]]; then
-            ADDED=$((ADDED + UNTRACKED_LINES))
-        fi
-        if [ -n "$(find "${UNTRACKED_SAMPLE[@]}" -maxdepth 0 -type f ! -size -"$MAX_UNTRACKED_SIZE" -print -quit 2>/dev/null)" ]; then
-            LINES_CAPPED="+"
-        fi
     fi
 fi
 
-echo -e "${CYAN}${MODEL}${R} ${DIM}|${R} ${PROJECT_PATH} ${DIM}|${R} ${MAGENTA}${BRANCH}${R} ${DIM}|${R} L: ${GREEN}+${ADDED}${LINES_CAPPED}${R} ${RED}-${REMOVED}${R} ${DIM}|${R} F: ${GREEN}+${ADDED_FILES}${R} ${RED}-${REMOVED_FILES}${R}"
-
-CTX_COST_STR="Ctx: ${CYAN}${CTX_PERCENT}%${R} ${DIM}(${CTX_FMT})${R} ${DIM}|${R} Cost: ${CYAN}\$${COST_FMT}${R}"
-
-# Per-model weekly buckets (e.g. Fable).
-MS_STR=""
-append_ms() {
-    [ -z "$1" ] && return
-    local PCT SEG
-    PCT=$(printf "%.0f" "$2")
-    SEG="$1: ${CYAN}${PCT}%${R}"
-    if [ -n "$MS_STR" ]; then
-        MS_STR="${MS_STR} ${DIM}|${R} ${SEG}"
-    else
-        MS_STR="$SEG"
-    fi
-}
-
-while IFS=$'\t' read -r MS_NAME MS_PCT; do
-    append_ms "$MS_NAME" "$MS_PCT"
-done < <(echo "$input" | jq -r '.rate_limits.model_scoped // [] | .[] | select(.utilization != null) | "\(.display_name)\t\(.utilization)"' 2>/dev/null)
-
-# The CLI (as of 2.1.241) never fills model_scoped in the statusline input,
-# so fall back to polling the usage endpoint (cached, refreshed in background).
-if [ -z "$MS_STR" ]; then
-    USAGE_CACHE="$STATUSLINE_DIR/usage-scoped.json"
-    CACHE_MTIME=$(stat -f %m "$USAGE_CACHE" 2>/dev/null || stat -c %Y "$USAGE_CACHE" 2>/dev/null || echo 0)
-    CACHE_AGE=$(( $(date +%s) - CACHE_MTIME ))
-    if [ "$CACHE_AGE" -ge 300 ]; then
-        touch "$USAGE_CACHE" 2>/dev/null
-        (
-            TOK=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null | jq -r '.claudeAiOauth.accessToken // empty')
-            if [ -z "$TOK" ] && [ -f "$HOME/.claude/.credentials.json" ]; then
-                TOK=$(jq -r '.claudeAiOauth.accessToken // empty' "$HOME/.claude/.credentials.json" 2>/dev/null)
-            fi
-            [ -n "$TOK" ] || exit 0
-            OUT=$(curl -s --max-time 5 https://api.anthropic.com/api/oauth/usage \
-                -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" \
-                -H "anthropic-beta: oauth-2025-04-20" \
-                | jq -c 'select(.error == null) | [.limits // [] | .[] | select(.kind == "weekly_scoped" and .scope.model.display_name != null) | {display_name: .scope.model.display_name, utilization: .percent}] | select(length > 0)' 2>/dev/null)
-            if [ -n "$OUT" ] && [ "$OUT" != "null" ]; then
-                printf '%s\n' "$OUT" > "$USAGE_CACHE.$$" && mv -f "$USAGE_CACHE.$$" "$USAGE_CACHE"
-            fi
-        ) >/dev/null 2>&1 &
-    fi
-    if [ -s "$USAGE_CACHE" ]; then
-        while IFS=$'\t' read -r MS_NAME MS_PCT; do
-            append_ms "$MS_NAME" "$MS_PCT"
-        done < <(jq -r '.[]? | "\(.display_name)\t\(.utilization)"' "$USAGE_CACHE" 2>/dev/null)
-    fi
-fi
-
-if [ -n "$RL_5H_PCT" ] || [ -n "$RL_7D_PCT" ] || [ -n "$MS_STR" ]; then
-    LINE2=""
-
-    if [ -n "$RL_5H_PCT" ]; then
-        RL_5H_PCT=$(printf "%.0f" "$RL_5H_PCT")
-        FH_STR="${CYAN}${RL_5H_PCT}%${R}"
-        if [ -n "$RL_5H_RESET" ]; then
-            NOW=$(date +%s)
-            DIFF=$((RL_5H_RESET - NOW))
-            [ "$DIFF" -lt 0 ] && DIFF=0
-            HRS=$((DIFF / 3600))
-            MINS=$(( (DIFF % 3600) / 60 ))
-            FH_STR="${FH_STR} ${HRS}h ${MINS}m"
-        fi
-        LINE2="$FH_STR"
-    fi
-
-    if [ -n "$RL_7D_PCT" ]; then
-        RL_7D_PCT=$(printf "%.0f" "$RL_7D_PCT")
-        SD_STR="${CYAN}${RL_7D_PCT}%${R}"
-        if [ -n "$RL_7D_RESET" ]; then
-            SD_DATE=$(date -r "$RL_7D_RESET" "+%a %-I:%M %p" 2>/dev/null || date -d "@$RL_7D_RESET" "+%a %-I:%M %p" 2>/dev/null || echo "")
-            if [ -n "$SD_DATE" ]; then
-                SD_STR="${SD_STR} ${SD_DATE}"
-            fi
-        fi
-        if [ -n "$LINE2" ]; then
-            LINE2="${LINE2} ${DIM}|${R} ${SD_STR}"
-        else
-            LINE2="$SD_STR"
-        fi
-    fi
-
-    if [ -n "$MS_STR" ]; then
-        if [ -n "$LINE2" ]; then
-            LINE2="${LINE2} ${DIM}|${R} ${MS_STR}"
-        else
-            LINE2="$MS_STR"
-        fi
-    fi
-
-    if [ -n "$LINE2" ]; then
-        LINE2="${LINE2} ${DIM}|${R} ${CTX_COST_STR}"
-    else
-        LINE2="$CTX_COST_STR"
-    fi
-
-    echo -e "$LINE2"
+# Rounded to the nearest 100 by jq to avoid flicker. Without current_usage,
+# reuse the last value of this session.
+CACHE_FILE="$STATUSLINE_DIR/ctx-cache-${SESSION_ID}"
+if [ "$CTX_TOKENS" -ge 0 ]; then
+    [ "$CTX_TOKENS" -gt 0 ] && echo "$CTX_TOKENS" > "$CACHE_FILE"
 else
-    echo -e "$CTX_COST_STR"
+    CTX_TOKENS=0
+    [ -f "$CACHE_FILE" ] && read -r CTX_TOKENS < "$CACHE_FILE"
 fi
+[ "$CTX_TOKENS" -gt 0 ] 2>/dev/null || CTX_TOKENS=0
+CTX_PERCENT="0.0"
+if [ "$CTX_TOKENS" -gt 0 ] && [ "$CTX_SIZE" -gt 0 ]; then
+    TENTHS=$(( (CTX_TOKENS * 1000 + CTX_SIZE / 2) / CTX_SIZE ))
+    CTX_PERCENT="$((TENTHS / 10)).$((TENTHS % 10))"
+fi
+CTX_FMT=""
+DIGITS=$CTX_TOKENS
+while [ ${#DIGITS} -gt 3 ]; do
+    CTX_FMT=" ${DIGITS: -3}$CTX_FMT"
+    DIGITS=${DIGITS%???}
+done
+CTX_FMT="$DIGITS$CTX_FMT"
+
+# Git stats come from a per-repo cache that a background job refreshes. The
+# interval grows with the job's duration so big repos are polled rarely.
+GIT_SEG=""
+if [ -n "$DIR" ]; then
+    STATS_CACHE="$STATUSLINE_DIR/git-stats-${DIR//\//_}"
+    G_TIME=0 G_DUR=0 G_ADD="" G_REM="" G_ADD_FILES="" G_REM_FILES=""
+    [ -r "$STATS_CACHE" ] && read -r G_TIME G_DUR G_ADD G_REM G_ADD_FILES G_REM_FILES < "$STATS_CACHE"
+    case "$G_TIME$G_DUR$G_ADD$G_REM$G_ADD_FILES" in *[!0-9]*) G_REM_FILES="" ;; esac
+    if [ -n "$G_REM_FILES" ]; then
+        GIT_SEG=" ${DIM}|${R} L: ${GREEN}+${G_ADD}${R} ${RED}-${G_REM}${R} ${DIM}|${R} F: ${GREEN}+${G_ADD_FILES}${R} ${RED}-${G_REM_FILES}${R}"
+        INTERVAL=$((G_DUR * 20))
+        [ "$INTERVAL" -lt 15 ] && INTERVAL=15
+        [ "$INTERVAL" -gt 300 ] && INTERVAL=300
+    else
+        G_TIME=0 INTERVAL=0
+    fi
+    if [ $((NOW - G_TIME)) -ge "$INTERVAL" ]; then
+        LOCK="$STATS_CACHE.lock"
+        # A crashed job leaves its lock behind; drop locks older than 5 minutes.
+        if [ -d "$LOCK" ] && [ -n "$(find "$LOCK" -maxdepth 0 -mmin +5 2>/dev/null)" ]; then
+            rmdir "$LOCK" 2>/dev/null
+        fi
+        if mkdir "$LOCK" 2>/dev/null; then
+            (
+                trap 'rmdir "$LOCK"' EXIT
+                cd "$DIR" || exit 0
+                LOW="nice -n 19"
+                command -v taskpolicy >/dev/null 2>&1 && LOW="taskpolicy -b"
+                START=$(date +%s)
+                A=0 D=0 AF=0 DF=0
+                if git rev-parse --verify -q HEAD >/dev/null 2>&1; then
+                    while IFS=$'\t' read -r N1 N2 _; do
+                        case "$N1" in
+                            " create mode "*) AF=$((AF + 1)) ;;
+                            " delete mode "*) DF=$((DF + 1)) ;;
+                            *)
+                                [[ "$N1" =~ ^[0-9]+$ ]] && A=$((A + N1))
+                                [[ "$N2" =~ ^[0-9]+$ ]] && D=$((D + N2))
+                                ;;
+                        esac
+                    done < <($LOW git --no-optional-locks diff --numstat --summary HEAD 2>/dev/null)
+                fi
+                # Untracked files count only as added files; reading them costs too much I/O.
+                UNTRACKED=$($LOW git --no-optional-locks ls-files --others --exclude-standard 2>/dev/null | wc -l)
+                AF=$((AF + UNTRACKED))
+                END=$(date +%s)
+                printf '%s %s %s %s %s %s\n' "$END" "$((END - START))" "$A" "$D" "$AF" "$DF" > "$STATS_CACHE.$$" \
+                    && mv -f "$STATS_CACHE.$$" "$STATS_CACHE"
+            ) >/dev/null 2>&1 &
+        fi
+    fi
+fi
+
+if [ "$USAGE_STALE" = 1 ]; then
+    # Throttle: record the attempt now, keep the old lines.
+    printf '%s\n%s\n' "$NOW" "$USAGE_DATA" > "$USAGE_CACHE.$$" 2>/dev/null && mv -f "$USAGE_CACHE.$$" "$USAGE_CACHE"
+    (
+        TOK=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null | jq -r '.claudeAiOauth.accessToken // empty')
+        if [ -z "$TOK" ] && [ -f "$HOME/.claude/.credentials.json" ]; then
+            TOK=$(jq -r '.claudeAiOauth.accessToken // empty' "$HOME/.claude/.credentials.json" 2>/dev/null)
+        fi
+        [ -n "$TOK" ] || exit 0
+        OUT=$(curl -s --max-time 5 https://api.anthropic.com/api/oauth/usage \
+            -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" \
+            -H "anthropic-beta: oauth-2025-04-20" \
+            | jq -r 'select(.error == null) | .limits // [] | .[]
+                | select(.kind == "weekly_scoped" and .scope.model.display_name != null)
+                | "\(.scope.model.display_name)\t\(.percent)"' 2>/dev/null)
+        if [ -n "$OUT" ]; then
+            printf '%s\n%s\n' "$(date +%s)" "$OUT" > "$USAGE_CACHE.$$" && mv -f "$USAGE_CACHE.$$" "$USAGE_CACHE"
+        fi
+    ) >/dev/null 2>&1 &
+fi
+
+printf '%s\n' "${CYAN}${MODEL}${R} ${DIM}|${R} ${PROJECT_PATH} ${DIM}|${R} ${MAGENTA}${BRANCH}${R}${GIT_SEG}"
+
+LINE2="Ctx: ${CYAN}${CTX_PERCENT}%${R} ${DIM}(${CTX_FMT})${R} ${DIM}|${R} Cost: ${CYAN}\$${COST_FMT}${R}"
+[ -n "$LINE2_HEAD" ] && LINE2="${LINE2_HEAD} ${DIM}|${R} ${LINE2}"
+printf '%s\n' "$LINE2"
