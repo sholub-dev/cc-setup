@@ -53,6 +53,7 @@ Makes animated product videos, README GIFs and motion graphics in code. Each fra
 ### Setup
 
 ```bash
-git clone https://github.com/sholub-dev/cc-setup.git
-cp -R cc-setup/skills/animate ~/.claude/skills/
+mkdir -p ~/.claude/skills && curl -fsSL https://codeload.github.com/sholub-dev/cc-setup/tar.gz/master | tar -xz -C ~/.claude/skills --strip-components=2 cc-setup-master/skills/animate
 ```
+
+Run the same command again to update. Restart Claude Code to load the skill.
