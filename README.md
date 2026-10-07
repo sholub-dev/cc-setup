@@ -106,3 +106,18 @@ Edit `~/.claude/scripts/notify.sh` to customize:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sholub-dev/cc-setup/master/uninstall-notifications.sh | bash
 ```
+
+---
+
+## Skills
+
+### animate
+
+Makes animated product videos, README GIFs and motion graphics in code. Each frame is a pure function of time, rendered in headless Chrome and encoded with ffmpeg. See [skills/animate/SKILL.md](skills/animate/SKILL.md).
+
+### Setup
+
+```bash
+git clone https://github.com/sholub-dev/cc-setup.git
+cp -R cc-setup/skills/animate ~/.claude/skills/
+```
